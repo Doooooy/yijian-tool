@@ -287,7 +287,7 @@
                             method: "POST",
                             headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.kimiApiKey}` },
                             body: JSON.stringify({
-                                model: "kimi-2.6",
+                                model: "kimi-k2.6",
                                 messages: [{
                                     role: "user",
                                     content: [
@@ -342,7 +342,7 @@
                 try {
                     const res = await fetch("https://api.moonshot.cn/v1/chat/completions", {
                         method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.kimiApiKey}` },
-                        body: JSON.stringify({ model: "kimi-2.6", messages: [{ role: "user", content: prompt }] })
+                        body: JSON.stringify({ model: "kimi-k2.6", messages: [{ role: "user", content: prompt }] })
                     });
                     const data = await res.json(); setAiAdvice(data.choices?.[0]?.message?.content || "API返回异常");
                 } catch(e) { setAiAdvice("请求失败: " + e.message); } finally { setIsAiLoading(false); }
