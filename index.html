@@ -390,14 +390,37 @@
                     }]
                 });
 
-                const year = new Date().getFullYear();
-                const calData = Object.keys(db.checkins).map(k => [k, db.checkins[k]]);
-                const calendarOption = {
-                    tooltip: { formatter: p => `${p.value[0]}: 刷卡 ${p.value[1]} 题` },
-                    visualMap: { min: 0, max: 100, type: 'piecewise', orient: 'horizontal', left: 'center', top: 0, inRange: { color: ['#f8fafc', '#bae6fd', '#3b82f6', '#1e3a8a'] }, show: false },
-                    calendar: { top: 30, left: 30, right: 30, bottom: 10, cellSize: ['auto', 16], range: year, itemStyle: { borderWidth: 0.5, borderColor: '#fff', color: '#f8fafc' }, yearLabel: { show: false }, dayLabel: { nameMap: 'ZH', color: '#64748b' }, monthLabel: { nameMap: 'ZH', color: '#64748b' } },
-                    series: [{ type: 'heatmap', coordinateSystem: 'calendar', data: calData }]
-                };
+                
+const checkinValues = Object.values(db.checkins);
+const maxCheckins = checkinValues.length > 0 ? Math.max(20, ...checkinValues) : 100;
+
+const year = new Date().getFullYear();
+const calData = Object.keys(db.checkins).map(k => [k, db.checkins[k]]);
+
+const calendarOption = {
+    tooltip: { formatter: p => `${p.value[0]}: 刷卡 ${p.value[1]} 题` },
+    visualMap: { 
+        min: 1, 
+        max: maxCheckins, 
+        type: 'continuous', 
+        orient: 'horizontal', 
+        left: 'center', 
+        top: 0, 
+        inRange: { color: ['#bae6fd', '#3b82f6', '#1e3a8a'] }, 
+        show: false 
+    },
+    calendar: { 
+        top: 30, left: 30, right: 30, bottom: 10, 
+        cellSize: ['auto', 16], 
+        range: year, 
+        itemStyle: { borderWidth: 0.5, borderColor: '#fff', color: '#f8fafc' }, 
+        yearLabel: { show: false }, 
+        dayLabel: { nameMap: 'cn', color: '#64748b' }, 
+        monthLabel: { nameMap: 'cn', color: '#64748b' } 
+    },
+    series: [{ type: 'heatmap', coordinateSystem: 'calendar', data: calData }]
+};
+
 
                 return { barOption, heatmapOption, trendOption, getGauge, calendarOption };
             }, [db, flatSections, selectedSubjectId]);
