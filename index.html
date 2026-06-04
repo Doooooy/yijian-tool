@@ -23,6 +23,8 @@
         @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
         /* 隐藏 input type="file" 的原生样式 */
         input[type="file"] { display: none; }
+        /* 优化 details 折叠组件 */
+        details > summary::-webkit-details-marker { display: none; }
     </style>
 </head>
 <body class="h-screen overflow-hidden">
@@ -89,6 +91,16 @@
             
             const [aiAdvice, setAiAdvice] = useState("");
             const [isAiLoading, setIsAiLoading] = useState(false);
+
+            // 累加模式的本地状态
+            const [addSingle, setAddSingle] = useState({ total: '', correct: '' });
+            const [addMulti, setAddMulti] = useState({ total: '', maxScore: '', actualScore: '' });
+
+            // 切换章节时清空累加输入框，防止误录
+            useEffect(() => {
+                setAddSingle({ total: '', correct: '' });
+                setAddMulti({ total: '', maxScore: '', actualScore: '' });
+            }, [selectedSectionId]);
 
             useEffect(() => localStorage.setItem("yijian_light_db", JSON.stringify(db)), [db]);
             useEffect(() => localStorage.setItem("yijian_light_settings", JSON.stringify(settings)), [settings]);
@@ -179,6 +191,7 @@
                 });
             };
 
+            // 手动覆盖修改逻辑
             const handleObjectiveChange = (type, field, value) => {
                 setDb(prev => {
                     const next = JSON.parse(JSON.stringify(prev));
@@ -189,12 +202,39 @@
                 });
             };
 
-            const handleCheckIn = () => {
-                if (!currentSection) return;
-                const qCount = currentSection.singleChoice.total + currentSection.multiChoice.total;
-                if (qCount === 0) return alert("当前节未录入任何题目数量，无法打卡！");
-                setDb(prev => ({ ...prev, checkins: { ...prev.checkins, [todayStr]: (prev.checkins[todayStr] || 0) + qCount } }));
-                alert("🎉 今日打卡成功！已同步至日历热力图。");
+            // 核心功能：智能累加并打卡
+            const handleAccumulateObjective = (type) => {
+                const toAddTotal = type === 'singleChoice' ? parseInt(addSingle.total) || 0 : parseInt(addMulti.total) || 0;
+                const toAddCorrectOrMax = type === 'singleChoice' ? parseInt(addSingle.correct) || 0 : parseFloat(addMulti.maxScore) || 0;
+                const toAddActual = type === 'singleChoice' ? 0 : parseFloat(addMulti.actualScore) || 0;
+
+                if (toAddTotal === 0 && toAddCorrectOrMax === 0 && toAddActual === 0) return;
+
+                setDb(prev => {
+                    const next = JSON.parse(JSON.stringify(prev));
+                    next.subjects.forEach(s => s.parts.forEach(p => p.chapters.forEach(c => c.sections.forEach(sec => {
+                        if (sec.id === selectedSectionId) {
+                            if (type === 'singleChoice') {
+                                sec.singleChoice.total = (sec.singleChoice.total || 0) + toAddTotal;
+                                sec.singleChoice.correct = (sec.singleChoice.correct || 0) + toAddCorrectOrMax;
+                            } else {
+                                sec.multiChoice.total = (sec.multiChoice.total || 0) + toAddTotal;
+                                sec.multiChoice.maxScore = (sec.multiChoice.maxScore || 0) + toAddCorrectOrMax;
+                                sec.multiChoice.actualScore = (sec.multiChoice.actualScore || 0) + toAddActual;
+                            }
+                        }
+                    }))));
+                    
+                    // 自动精准打卡：只加上本次新增的题量
+                    if (toAddTotal > 0) {
+                        next.checkins[todayStr] = (next.checkins[todayStr] || 0) + toAddTotal;
+                    }
+                    return next;
+                });
+
+                // 重置当前累加输入框
+                if (type === 'singleChoice') setAddSingle({ total: '', correct: '' });
+                else setAddMulti({ total: '', maxScore: '', actualScore: '' });
             };
 
             const handleUpdateSub = (caseId, subId, field, value) => {
@@ -213,7 +253,7 @@
                     img.src = e.target.result;
                     img.onload = () => {
                         const canvas = document.createElement('canvas');
-                        const MAX_WIDTH = 1000; // 压缩阈值
+                        const MAX_WIDTH = 1000;
                         let width = img.width;
                         let height = img.height;
                         if (width > MAX_WIDTH) {
@@ -224,7 +264,7 @@
                         canvas.height = height;
                         const ctx = canvas.getContext('2d');
                         ctx.drawImage(img, 0, 0, width, height);
-                        const dataUrl = canvas.toDataURL('image/jpeg', 0.6); // 降低质量以缩减体积
+                        const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
                         callback(dataUrl);
                     }
                 }
@@ -241,14 +281,13 @@
 
                 compressImage(file, async (base64Img) => {
                     try {
-                        // 【修复核心】：在 Prompt 中明确要求 AI 返回 backgroundText 字段，并交代清楚要求
                         const prompt = `这是一道一级建造师考试的案例题图片。请识别出案例题的大题背景（前置工程条件/事件描述），以及包含的各个子问题（小问）。返回严格的 JSON 格式：{ "caseName": "简短的大题名称", "backgroundText": "案例背景和事件的完整描述文本", "subQuestions": ["第1问：...", "第2问：..."] }。不要输出任何除了 JSON 之外的其他解释性内容。`;
 
                         const response = await fetch("https://api.moonshot.cn/v1/chat/completions", {
                             method: "POST",
                             headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.kimiApiKey}` },
                             body: JSON.stringify({
-                                model: "kimi-k2.6",
+                                model: "kimi-2.6",
                                 messages: [{
                                     role: "user",
                                     content: [
@@ -263,13 +302,12 @@
                         if(resData.error) throw new Error(resData.error.message);
                         
                         let content = resData.choices[0].message.content;
-                        content = content.replace(/```json/g, '').replace(/```/g, '').trim(); // 清理 markdown 标签
+                        content = content.replace(/```json/g, '').replace(/```/g, '').trim();
                         const parsed = JSON.parse(content);
 
                         const newCase = {
                             id: generateId(),
                             name: parsed.caseName || "OCR 智能识别案例题",
-                            // 【修复核心】：将解析出来的背景文本存入对象的 backgroundText 属性中
                             backgroundText: parsed.backgroundText || "", 
                             subjectId: selectedSubjectId,
                             imageUrl: base64Img, 
@@ -304,7 +342,7 @@
                 try {
                     const res = await fetch("https://api.moonshot.cn/v1/chat/completions", {
                         method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.kimiApiKey}` },
-                        body: JSON.stringify({ model: "kimi-k2.6", messages: [{ role: "user", content: prompt }] })
+                        body: JSON.stringify({ model: "kimi-2.6", messages: [{ role: "user", content: prompt }] })
                     });
                     const data = await res.json(); setAiAdvice(data.choices?.[0]?.message?.content || "API返回异常");
                 } catch(e) { setAiAdvice("请求失败: " + e.message); } finally { setIsAiLoading(false); }
@@ -461,53 +499,125 @@
 
                             <div className="flex-1 overflow-y-auto p-6">
                                 
-                                {/* 视图 1：客观题录入 */}
+                                {/* 视图 1：客观题录入 (全新累加模式) */}
                                 {activeTab === "input" && (
                                     <div className="max-w-3xl space-y-6 fade-in mx-auto mt-4">
-                                        <div className="flex justify-between items-end border-b border-slate-200 pb-4">
-                                            <div>
-                                                <div className="text-xs text-slate-500 mb-1">{currentSection ? flatSections.find(s=>s.id===selectedSectionId)?.pathName : ''}</div>
+                                        <div className="border-b border-slate-200 pb-4">
+                                            <div className="text-xs text-slate-500 mb-1">{currentSection ? flatSections.find(s=>s.id===selectedSectionId)?.pathName : ''}</div>
+                                            <div className="flex justify-between items-end">
                                                 <h2 className="text-2xl font-bold text-slate-800">{currentSection?.name || '👈 请先在左侧选择大纲章节'}</h2>
+                                                <span className="text-xs text-slate-500 bg-emerald-50 px-3 py-1.5 rounded-full border border-emerald-100 text-emerald-600 font-medium">💡 提示：填写并确认累加，系统将自动产生今日打卡记录。</span>
                                             </div>
-                                            {currentSection && (
-                                                <button onClick={handleCheckIn} className="bg-emerald-500 hover:bg-emerald-600 text-white px-6 py-2.5 rounded-lg font-bold shadow-sm transition">
-                                                    📅 今日一键打卡
-                                                </button>
-                                            )}
                                         </div>
                                         
                                         {currentSection && (
                                             <>
-                                                <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm grid grid-cols-2 gap-6">
-                                                    <div className="col-span-2 flex items-center space-x-2 text-blue-600 font-bold border-b border-slate-100 pb-2">
-                                                        <span className="w-1.5 h-4 bg-blue-500 rounded-full inline-block"></span> <span>单项选择题</span>
+                                                {/* 单项选择题模块 */}
+                                                <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
+                                                    <div className="flex justify-between items-center border-b border-slate-100 pb-3">
+                                                        <div className="flex items-center space-x-2 text-blue-600 font-bold">
+                                                            <span className="w-1.5 h-4 bg-blue-500 rounded-full inline-block"></span>
+                                                            <span className="text-lg">单项选择题</span>
+                                                        </div>
+                                                        <div className="text-sm font-medium text-slate-600 bg-slate-50 px-3 py-1 rounded-full border border-slate-200 shadow-inner">
+                                                            历史累计总数: <span className="text-blue-600 font-bold text-lg mx-1">{currentSection.singleChoice.total}</span>题 
+                                                            <span className="text-slate-300 mx-2">|</span> 
+                                                            累计正确: <span className="text-emerald-500 font-bold text-lg mx-1">{currentSection.singleChoice.correct}</span>题
+                                                        </div>
                                                     </div>
-                                                    <div>
-                                                        <label className="block text-xs font-bold text-slate-500 mb-2">总做题量 (道)</label>
-                                                        <input type="number" value={currentSection.singleChoice.total||''} onChange={e=>handleObjectiveChange('singleChoice','total',e.target.value)} className="w-full bg-slate-50 border border-slate-200 p-2.5 rounded-lg focus:outline-none focus:border-blue-500 focus:bg-white transition text-sm" />
+                                                    
+                                                    {/* 累加区 */}
+                                                    <div className="grid grid-cols-2 gap-6 bg-blue-50/50 p-5 rounded-xl border border-blue-100 items-end shadow-sm">
+                                                        <div>
+                                                            <label className="block text-xs font-bold text-blue-700 mb-2">➕ 本次新做题量 (道)</label>
+                                                            <input type="number" value={addSingle.total} onChange={e=>setAddSingle(p=>({...p, total: e.target.value}))} className="w-full bg-white border border-blue-200 p-2.5 rounded-lg focus:outline-none focus:border-blue-500 transition text-sm shadow-sm" placeholder="例如: 15" />
+                                                        </div>
+                                                        <div>
+                                                            <label className="block text-xs font-bold text-blue-700 mb-2">➕ 本次新做且正确量 (道)</label>
+                                                            <input type="number" value={addSingle.correct} onChange={e=>setAddSingle(p=>({...p, correct: e.target.value}))} className="w-full bg-white border border-blue-200 p-2.5 rounded-lg focus:outline-none focus:border-blue-500 transition text-sm shadow-sm" placeholder="例如: 12" />
+                                                        </div>
+                                                        <div className="col-span-2 flex justify-end mt-2">
+                                                            <button onClick={() => handleAccumulateObjective('singleChoice')} className="bg-blue-600 hover:bg-blue-500 text-white px-6 py-2.5 rounded-lg text-sm font-bold shadow-md transition transform hover:-translate-y-0.5 flex items-center space-x-2">
+                                                                <span>✅ 确认累加并打卡</span>
+                                                            </button>
+                                                        </div>
                                                     </div>
-                                                    <div>
-                                                        <label className="block text-xs font-bold text-slate-500 mb-2">正确数量 (道)</label>
-                                                        <input type="number" value={currentSection.singleChoice.correct||''} onChange={e=>handleObjectiveChange('singleChoice','correct',e.target.value)} className="w-full bg-slate-50 border border-slate-200 p-2.5 rounded-lg focus:outline-none focus:border-blue-500 focus:bg-white transition text-sm" />
-                                                    </div>
+
+                                                    {/* 强制覆盖区 */}
+                                                    <details className="mt-2 group">
+                                                        <summary className="text-[11px] text-slate-400 cursor-pointer hover:text-slate-600 list-none flex items-center p-2">
+                                                            <span className="border-b border-dashed border-slate-300">⚙️ 历史数据录错了？展开手动覆盖修改</span>
+                                                        </summary>
+                                                        <div className="grid grid-cols-2 gap-6 mt-2 p-4 bg-slate-50 rounded-lg border border-slate-100">
+                                                            <div>
+                                                                <label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase tracking-wider">强行覆写：总题数</label>
+                                                                <input type="number" value={currentSection.singleChoice.total||''} onChange={e=>handleObjectiveChange('singleChoice','total',e.target.value)} className="w-full bg-white border border-slate-200 p-2 rounded focus:outline-none focus:border-slate-400 text-sm" />
+                                                            </div>
+                                                            <div>
+                                                                <label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase tracking-wider">强行覆写：正确数</label>
+                                                                <input type="number" value={currentSection.singleChoice.correct||''} onChange={e=>handleObjectiveChange('singleChoice','correct',e.target.value)} className="w-full bg-white border border-slate-200 p-2 rounded focus:outline-none focus:border-slate-400 text-sm" />
+                                                            </div>
+                                                        </div>
+                                                    </details>
                                                 </div>
 
-                                                <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm grid grid-cols-3 gap-6">
-                                                    <div className="col-span-3 flex items-center space-x-2 text-blue-600 font-bold border-b border-slate-100 pb-2">
-                                                        <span className="w-1.5 h-4 bg-blue-500 rounded-full inline-block"></span> <span>多项选择题</span>
+                                                {/* 多项选择题模块 */}
+                                                <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
+                                                    <div className="flex justify-between items-center border-b border-slate-100 pb-3">
+                                                        <div className="flex items-center space-x-2 text-blue-600 font-bold">
+                                                            <span className="w-1.5 h-4 bg-blue-500 rounded-full inline-block"></span>
+                                                            <span className="text-lg">多项选择题</span>
+                                                        </div>
+                                                        <div className="text-sm font-medium text-slate-600 bg-slate-50 px-3 py-1 rounded-full border border-slate-200 shadow-inner">
+                                                            历史累计: <span className="text-blue-600 font-bold text-lg mx-1">{currentSection.multiChoice.total}</span>题
+                                                            <span className="text-slate-300 mx-2">|</span>
+                                                            总满分 <span className="text-slate-700 font-bold text-lg mx-1">{currentSection.multiChoice.maxScore}</span>分
+                                                            <span className="text-slate-300 mx-2">|</span>
+                                                            总实得 <span className="text-emerald-500 font-bold text-lg mx-1">{currentSection.multiChoice.actualScore}</span>分
+                                                        </div>
                                                     </div>
-                                                    <div>
-                                                        <label className="block text-xs font-bold text-slate-500 mb-2">总做题量 (道)</label>
-                                                        <input type="number" value={currentSection.multiChoice.total||''} onChange={e=>handleObjectiveChange('multiChoice','total',e.target.value)} className="w-full bg-slate-50 border border-slate-200 p-2.5 rounded-lg focus:outline-none focus:border-blue-500 focus:bg-white transition text-sm" />
+                                                    
+                                                    {/* 累加区 */}
+                                                    <div className="grid grid-cols-3 gap-5 bg-blue-50/50 p-5 rounded-xl border border-blue-100 items-end shadow-sm">
+                                                        <div>
+                                                            <label className="block text-xs font-bold text-blue-700 mb-2">➕ 本次新做题量</label>
+                                                            <input type="number" value={addMulti.total} onChange={e=>setAddMulti(p=>({...p, total: e.target.value}))} className="w-full bg-white border border-blue-200 p-2.5 rounded-lg focus:outline-none focus:border-blue-500 transition text-sm shadow-sm" placeholder="例如: 5" />
+                                                        </div>
+                                                        <div>
+                                                            <label className="block text-xs font-bold text-blue-700 mb-2">➕ 本次满分合计</label>
+                                                            <input type="number" value={addMulti.maxScore} onChange={e=>setAddMulti(p=>({...p, maxScore: e.target.value}))} className="w-full bg-white border border-blue-200 p-2.5 rounded-lg focus:outline-none focus:border-blue-500 transition text-sm shadow-sm" placeholder="例如: 10" />
+                                                        </div>
+                                                        <div>
+                                                            <label className="block text-xs font-bold text-blue-700 mb-2">➕ 本次实得总分</label>
+                                                            <input type="number" value={addMulti.actualScore} onChange={e=>setAddMulti(p=>({...p, actualScore: e.target.value}))} className="w-full bg-white border border-blue-200 p-2.5 rounded-lg focus:outline-none focus:border-blue-500 transition text-sm shadow-sm" placeholder="例如: 8.5" />
+                                                        </div>
+                                                        <div className="col-span-3 flex justify-end mt-2">
+                                                            <button onClick={() => handleAccumulateObjective('multiChoice')} className="bg-blue-600 hover:bg-blue-500 text-white px-6 py-2.5 rounded-lg text-sm font-bold shadow-md transition transform hover:-translate-y-0.5 flex items-center space-x-2">
+                                                                <span>✅ 确认累加并打卡</span>
+                                                            </button>
+                                                        </div>
                                                     </div>
-                                                    <div>
-                                                        <label className="block text-xs font-bold text-slate-500 mb-2">满分总计 (分)</label>
-                                                        <input type="number" value={currentSection.multiChoice.maxScore||''} onChange={e=>handleObjectiveChange('multiChoice','maxScore',e.target.value)} className="w-full bg-slate-50 border border-slate-200 p-2.5 rounded-lg focus:outline-none focus:border-blue-500 focus:bg-white transition text-sm" />
-                                                    </div>
-                                                    <div>
-                                                        <label className="block text-xs font-bold text-slate-500 mb-2">学员实得 (分)</label>
-                                                        <input type="number" value={currentSection.multiChoice.actualScore||''} onChange={e=>handleObjectiveChange('multiChoice','actualScore',e.target.value)} className="w-full bg-slate-50 border border-slate-200 p-2.5 rounded-lg focus:outline-none focus:border-blue-500 focus:bg-white transition text-sm" />
-                                                    </div>
+
+                                                    {/* 强制覆盖区 */}
+                                                    <details className="mt-2 group">
+                                                        <summary className="text-[11px] text-slate-400 cursor-pointer hover:text-slate-600 list-none flex items-center p-2">
+                                                            <span className="border-b border-dashed border-slate-300">⚙️ 历史数据录错了？展开手动覆盖修改</span>
+                                                        </summary>
+                                                        <div className="grid grid-cols-3 gap-5 mt-2 p-4 bg-slate-50 rounded-lg border border-slate-100">
+                                                            <div>
+                                                                <label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase tracking-wider">强行覆写：总题数</label>
+                                                                <input type="number" value={currentSection.multiChoice.total||''} onChange={e=>handleObjectiveChange('multiChoice','total',e.target.value)} className="w-full bg-white border border-slate-200 p-2 rounded focus:outline-none focus:border-slate-400 text-sm" />
+                                                            </div>
+                                                            <div>
+                                                                <label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase tracking-wider">强行覆写：满分合计</label>
+                                                                <input type="number" value={currentSection.multiChoice.maxScore||''} onChange={e=>handleObjectiveChange('multiChoice','maxScore',e.target.value)} className="w-full bg-white border border-slate-200 p-2 rounded focus:outline-none focus:border-slate-400 text-sm" />
+                                                            </div>
+                                                            <div>
+                                                                <label className="block text-[10px] font-bold text-slate-500 mb-1 uppercase tracking-wider">强行覆写：实得总计</label>
+                                                                <input type="number" value={currentSection.multiChoice.actualScore||''} onChange={e=>handleObjectiveChange('multiChoice','actualScore',e.target.value)} className="w-full bg-white border border-slate-200 p-2 rounded focus:outline-none focus:border-slate-400 text-sm" />
+                                                            </div>
+                                                        </div>
+                                                    </details>
                                                 </div>
                                             </>
                                         )}
@@ -583,12 +693,10 @@
                                                                         const rate = sub.maxScore > 0 ? Math.round((sub.actualScore / sub.maxScore) * 100) : 0;
                                                                         return (
                                                                             <div key={sub.id} className="flex flex-wrap xl:flex-nowrap gap-4 items-start bg-slate-50/80 p-4 rounded-xl border border-slate-200 transition hover:border-blue-300 hover:shadow-sm">
-                                                                                {/* 改为 textarea 以防问题描述过长，并限制其宽度占比 */}
                                                                                 <div className="flex-1 min-w-[280px] xl:max-w-[40%]">
                                                                                     <label className="block text-[10px] text-slate-400 mb-1">小问描述</label>
                                                                                     <textarea value={sub.title} rows="2" onChange={(e) => handleUpdateSub(cq.id, sub.id, 'title', e.target.value)} className="w-full bg-white border border-slate-200 rounded-md px-3 py-2 text-xs focus:border-blue-500 focus:outline-none text-slate-700 resize-y shadow-sm" placeholder="输入第X问详细描述..." />
                                                                                 </div>
-                                                                                {/* 打分与考点映射 */}
                                                                                 <div className="flex flex-1 flex-wrap gap-4 items-start">
                                                                                     <div className="flex items-center space-x-2 bg-white px-3 py-2 rounded-md border border-slate-200 shadow-sm shrink-0">
                                                                                         <span className="text-[10px] text-slate-500 font-medium">满分</span>
