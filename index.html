@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>一建备考精准刷题统计系统 (浅色智能版)</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React 18 & ReactDOM -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <!-- Babel Standalone -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- ECharts -->
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+    <style>
+        body { background-color: #f1f5f9; color: #334155; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        .fade-in { animation: fadeIn 0.3s ease-in-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+        /* 隐藏 input type="file" 的原生样式 */
+        input[type="file"] { display: none; }
+    </style>
+</head>
+<body class="h-screen overflow-hidden">
+    <div id="root" class="h-full"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useMemo } = React;
+        const generateId = () => Math.random().toString(36).substring(2, 11);
+
+        const EChart = ({ option, style, className }) => {
+            const chartRef = useRef(null);
+            useEffect(() => {
+                let chartInstance;
+                if (chartRef.current) {
+                    chartInstance = echarts.init(chartRef.current);
+                    chartInstance.setOption(option, true);
+                }
+                const handleResize = () => chartInstance && chartInstance.resize();
+                window.addEventListener('resize', handleResize);
+                return () => {
+                    window.removeEventListener('resize', handleResize);
+                    chartInstance && chartInstance.dispose();
+                };
+            }, [option]);
+            return <div ref={chartRef} style={style} className={className}></div>;
+        };
+
+        const getInitialDB = () => ({
+            version: 5,
+            subjects: [
+                {
+                    id: "subj-1", name: "建筑实务", parts: [{
+                        id: "part-1", name: "建筑工程技术", chapters: [{
+                            id: "chap-1", name: "建筑设计与构造", sections: [
+                                { id: "sec-1", name: "建筑设计要求", singleChoice: { total: 30, correct: 24 }, multiChoice: { total: 10, maxScore: 20, actualScore: 16 } },
+                                { id: "sec-2", name: "建筑构造要求", singleChoice: { total: 20, correct: 11 }, multiChoice: { total: 5, maxScore: 10, actualScore: 5 } }
+                            ]
+                        }]
+                    }]
+                },
+                { id: "subj-2", name: "经济", parts: [] },
+                { id: "subj-3", name: "法规", parts: [] }
+            ],
+            caseQuestions: [],
+            checkins: {}
+        });
+
+        function App() {
+            const [db, setDb] = useState(() => {
+                const local = localStorage.getItem("yijian_light_db");
+                return local ? JSON.parse(local) : getInitialDB();
+            });
+            const [settings, setSettings] = useState(() => {
+                const local = localStorage.getItem("yijian_light_settings");
+                return local ? JSON.parse(local) : { kimiApiKey: "", examDate: "2026-09-19" };
+            });
+
+            const [activeTab, setActiveTab] = useState("input");
+            const [activeChartTab, setActiveChartTab] = useState("bar");
+            const [selectedSubjectId, setSelectedSubjectId] = useState("subj-1");
+            const [selectedSectionId, setSelectedSectionId] = useState("sec-1");
+            const [showSettings, setShowSettings] = useState(false);
+            const [expandedNodes, setExpandedNodes] = useState({"part-1": true, "chap-1": true});
+            
+            const [aiAdvice, setAiAdvice] = useState("");
+            const [isAiLoading, setIsAiLoading] = useState(false);
+
+            useEffect(() => localStorage.setItem("yijian_light_db", JSON.stringify(db)), [db]);
+            useEffect(() => localStorage.setItem("yijian_light_settings", JSON.stringify(settings)), [settings]);
+
+            const flatSections = useMemo(() => {
+                const list = [];
+                db.subjects.forEach(s => s.parts.forEach(p => p.chapters.forEach(c => c.sections.forEach(sec => 
+                    list.push({ ...sec, pathName: `${s.name} > ${p.name} > ${c.name} > ${sec.name}`, subjectId: s.id, chapterName: c.name })
+                ))));
+                return list;
+            }, [db]);
+
+            const daysLeft = useMemo(() => Math.max(0, Math.ceil((new Date(settings.examDate) - new Date()) / 86400000)), [settings.examDate]);
+            const todayStr = new Date().toISOString().split('T')[0];
+            const isCheckedInToday = !!db.checkins[todayStr];
+
+            const dashboardStats = useMemo(() => {
+                let totalQs = 0;
+                let last7DaysCount = 0;
+                const subjScores = {};
+                
+                const today = new Date();
+                for(let i=0; i<7; i++) {
+                    const d = new Date(today);
+                    d.setDate(d.getDate() - i);
+                    if(db.checkins[d.toISOString().split('T')[0]]) last7DaysCount++;
+                }
+
+                db.subjects.forEach(s => {
+                    let sTotalMax = 0, sTotalAct = 0;
+                    s.parts.forEach(p => p.chapters.forEach(c => c.sections.forEach(sec => {
+                        sTotalMax += sec.singleChoice.total + sec.multiChoice.maxScore;
+                        sTotalAct += sec.singleChoice.correct + sec.multiChoice.actualScore;
+                        totalQs += sec.singleChoice.total + sec.multiChoice.total;
+                    })));
+
+                    db.caseQuestions.filter(cq => cq.subjectId === s.id).forEach(cq => {
+                        cq.subQuestions.forEach(sub => {
+                            sTotalMax += sub.maxScore;
+                            sTotalAct += sub.actualScore;
+                            totalQs += 1;
+                        });
+                    });
+
+                    subjScores[s.id] = sTotalMax > 0 ? Math.round((sTotalAct / sTotalMax) * 100) : 0;
+                });
+                return { totalQs, last7DaysCount, subjScores };
+            }, [db]);
+
+            const currentSubject = db.subjects.find(s => s.id === selectedSubjectId);
+            const currentSection = flatSections.find(s => s.id === selectedSectionId);
+
+            const handleAddOutlineNode = (type, parentNode) => {
+                const name = prompt(`添加新【${type === 'part' ? '篇' : type === 'chapter' ? '章' : '节'}】:`);
+                if (!name) return;
+                setDb(prev => {
+                    const next = JSON.parse(JSON.stringify(prev));
+                    if (type === 'part') next.subjects.find(s => s.id === selectedSubjectId).parts.push({ id: generateId(), name, chapters: [] });
+                    else if (type === 'chapter') next.subjects.forEach(s => s.parts.forEach(p => { if(p.id === parentNode.id) p.chapters.push({ id: generateId(), name, sections: [] }) }));
+                    else if (type === 'section') next.subjects.forEach(s => s.parts.forEach(p => p.chapters.forEach(c => { if(c.id === parentNode.id) c.sections.push({ id: generateId(), name, singleChoice: { total: 0, correct: 0 }, multiChoice: { total: 0, maxScore: 0, actualScore: 0 } }) })));
+                    return next;
+                });
+            };
+
+            const handleEditNode = (type, id) => {
+                const newName = prompt("请输入修改后的名称：");
+                if (!newName) return;
+                setDb(prev => {
+                    const next = JSON.parse(JSON.stringify(prev));
+                    if (type === 'part') next.subjects.forEach(s => s.parts.forEach(p => { if (p.id === id) p.name = newName; }));
+                    else if (type === 'chapter') next.subjects.forEach(s => s.parts.forEach(p => p.chapters.forEach(c => { if (c.id === id) c.name = newName; })));
+                    else if (type === 'section') next.subjects.forEach(s => s.parts.forEach(p => p.chapters.forEach(c => c.sections.forEach(sec => { if (sec.id === id) sec.name = newName; }))));
+                    return next;
+                });
+            };
+
+            const handleDeleteNode = (type, id) => {
+                if (!confirm(`确定要删除这个${type === 'part' ? '篇' : type === 'chapter' ? '章' : '节'}及其所有子内容吗？此操作不可逆！`)) return;
+                setDb(prev => {
+                    const next = JSON.parse(JSON.stringify(prev));
+                    if (type === 'part') next.subjects.forEach(s => { s.parts = s.parts.filter(p => p.id !== id); });
+                    else if (type === 'chapter') next.subjects.forEach(s => s.parts.forEach(p => { p.chapters = p.chapters.filter(c => c.id !== id); }));
+                    else if (type === 'section') {
+                        next.subjects.forEach(s => s.parts.forEach(p => p.chapters.forEach(c => { c.sections = c.sections.filter(sec => sec.id !== id); })));
+                        if (selectedSectionId === id) setSelectedSectionId(null);
+                    }
+                    return next;
+                });
+            };
+
+            const handleObjectiveChange = (type, field, value) => {
+                setDb(prev => {
+                    const next = JSON.parse(JSON.stringify(prev));
+                    next.subjects.forEach(s => s.parts.forEach(p => p.chapters.forEach(c => c.sections.forEach(sec => {
+                        if (sec.id === selectedSectionId) sec[type][field] = parseFloat(value) || 0;
+                    }))));
+                    return next;
+                });
+            };
+
+            const handleCheckIn = () => {
+                if (!currentSection) return;
+                const qCount = currentSection.singleChoice.total + currentSection.multiChoice.total;
+                if (qCount === 0) return alert("当前节未录入任何题目数量，无法打卡！");
+                setDb(prev => ({ ...prev, checkins: { ...prev.checkins, [todayStr]: (prev.checkins[todayStr] || 0) + qCount } }));
+                alert("🎉 今日打卡成功！已同步至日历热力图。");
+            };
+
+            const handleUpdateSub = (caseId, subId, field, value) => {
+                setDb(prev => ({
+                    ...prev, caseQuestions: prev.caseQuestions.map(cq => cq.id === caseId ? {
+                        ...cq, subQuestions: cq.subQuestions.map(sub => sub.id === subId ? { ...sub, [field]: (field === 'title' || field === 'linkedSectionId') ? value : (parseFloat(value) || 0) } : sub)
+                    } : cq)
+                }));
+            };
+
+            const compressImage = (file, callback) => {
+                const reader = new FileReader();
+                reader.readAsDataURL(file);
+                reader.onload = (e) => {
+                    const img = new Image();
+                    img.src = e.target.result;
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        const MAX_WIDTH = 1000; // 压缩阈值
+                        let width = img.width;
+                        let height = img.height;
+                        if (width > MAX_WIDTH) {
+                            height *= MAX_WIDTH / width;
+                            width = MAX_WIDTH;
+                        }
+                        canvas.width = width;
+                        canvas.height = height;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, width, height);
+                        const dataUrl = canvas.toDataURL('image/jpeg', 0.6); // 降低质量以缩减体积
+                        callback(dataUrl);
+                    }
+                }
+            };
+
+            const handleOcrUpload = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                if (!settings.kimiApiKey) return alert("请先在右上角【设置】中配置 Kimi API Key 以使用智能识别");
+
+                setIsAiLoading(true); 
+                setAiAdvice("正在压缩图片并调用 Kimi Vision 模型进行识别，请稍候...");
+                setActiveTab("cases");
+
+                compressImage(file, async (base64Img) => {
+                    try {
+                        // 【修复核心】：在 Prompt 中明确要求 AI 返回 backgroundText 字段，并交代清楚要求
+                        const prompt = `这是一道一级建造师考试的案例题图片。请识别出案例题的大题背景（前置工程条件/事件描述），以及包含的各个子问题（小问）。返回严格的 JSON 格式：{ "caseName": "简短的大题名称", "backgroundText": "案例背景和事件的完整描述文本", "subQuestions": ["第1问：...", "第2问：..."] }。不要输出任何除了 JSON 之外的其他解释性内容。`;
+
+                        const response = await fetch("https://api.moonshot.cn/v1/chat/completions", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.kimiApiKey}` },
+                            body: JSON.stringify({
+                                model: "moonshot-v1-8k-vision-preview",
+                                messages: [{
+                                    role: "user",
+                                    content: [
+                                        { type: "text", text: prompt },
+                                        { type: "image_url", image_url: { url: base64Img } }
+                                    ]
+                                }]
+                            })
+                        });
+
+                        const resData = await response.json();
+                        if(resData.error) throw new Error(resData.error.message);
+                        
+                        let content = resData.choices[0].message.content;
+                        content = content.replace(/```json/g, '').replace(/```/g, '').trim(); // 清理 markdown 标签
+                        const parsed = JSON.parse(content);
+
+                        const newCase = {
+                            id: generateId(),
+                            name: parsed.caseName || "OCR 智能识别案例题",
+                            // 【修复核心】：将解析出来的背景文本存入对象的 backgroundText 属性中
+                            backgroundText: parsed.backgroundText || "", 
+                            subjectId: selectedSubjectId,
+                            imageUrl: base64Img, 
+                            subQuestions: (parsed.subQuestions || []).map(q => ({
+                                id: generateId(), title: q, maxScore: 5, actualScore: 0, linkedSectionId: ""
+                            }))
+                        };
+
+                        setDb(prev => ({ ...prev, caseQuestions: [newCase, ...prev.caseQuestions] }));
+                        setAiAdvice("✨ OCR 识图成功！已自动提取背景题干并拆分出子问题，请在微操区继续配置得分与考点。");
+                    } catch (err) {
+                        setAiAdvice("OCR 识别失败，可能是网络问题或 API 余额不足。");
+                        alert("识别失败: " + err.message);
+                    } finally {
+                        setIsAiLoading(false);
+                    }
+                });
+            };
+
+            const fetchAiAdvice = async () => {
+                if (!settings.kimiApiKey) return alert("请配置 Kimi API Key");
+                setIsAiLoading(true); setAiAdvice("大模型正在多维透视您的客观题正确率、案例失分点及打卡频率...");
+                
+                const weakCases = db.caseQuestions.flatMap(cq => cq.subQuestions).filter(sub => sub.maxScore > 0 && (sub.actualScore / sub.maxScore) < 0.6).map(sub => `案例小问[${sub.title}]得分率<60%`);
+                const weakSecs = flatSections.filter(s => s.singleChoice.total > 0 && (s.singleChoice.correct / s.singleChoice.total) < 0.6).map(s => s.name);
+                
+                const prompt = `一建备考距今${daysLeft}天。累计刷题${dashboardStats.totalQs}道，近7天打卡${dashboardStats.last7DaysCount}天。
+当前客观题薄弱章节：${weakSecs.slice(0,3).join(', ')||'无'}。
+当前案例题薄弱点：${weakCases.slice(0,3).join(', ')||'无'}。
+请作为导师，给出包含重点复习方向、时间分配、鼓励话语的200字极简复习建议。`;
+
+                try {
+                    const res = await fetch("https://api.moonshot.cn/v1/chat/completions", {
+                        method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.kimiApiKey}` },
+                        body: JSON.stringify({ model: "moonshot-v1-8k", messages: [{ role: "user", content: prompt }] })
+                    });
+                    const data = await res.json(); setAiAdvice(data.choices?.[0]?.message?.content || "API返回异常");
+                } catch(e) { setAiAdvice("请求失败: " + e.message); } finally { setIsAiLoading(false); }
+            };
+
+            const chartOptions = useMemo(() => {
+                const subjSections = flatSections.filter(fs => fs.subjectId === selectedSubjectId);
+                const barOption = {
+                    tooltip: { formatter: '{b}: 正确率 {c}%' },
+                    grid: { left: '5%', right: '5%', bottom: '20%', top: '10%' },
+                    xAxis: { type: 'category', data: subjSections.map(s => s.name), axisLabel: { rotate: 20, fontSize: 10, color: '#64748b' } },
+                    yAxis: { type: 'value', max: 100, splitLine: { lineStyle: { type: 'dashed', color: '#e2e8f0' } } },
+                    series: [{ data: subjSections.map(s => s.singleChoice.total ? Math.round((s.singleChoice.correct / s.singleChoice.total)*100) : 0), type: 'bar', barMaxWidth: 25, itemStyle: { color: p => p.value < 60 ? '#f43f5e' : '#3b82f6', borderRadius: [4,4,0,0] } }]
+                };
+
+                const chapters = [...new Set(subjSections.map(s => s.chapterName))];
+                const heatmapData = subjSections.map(s => {
+                    const rate = s.singleChoice.total ? Math.round((s.singleChoice.correct / s.singleChoice.total)*100) : null;
+                    return [chapters.indexOf(s.chapterName), subjSections.indexOf(s), rate];
+                }).filter(d => d[2] !== null);
+                const heatmapOption = {
+                    tooltip: { position: 'top', formatter: p => `正确率: ${p.data[2]}%` },
+                    grid: { left: '20%', right: '5%', top: '5%', bottom: '15%' },
+                    xAxis: { type: 'category', data: chapters, splitArea: { show: true }, axisLabel: { fontSize: 10, rotate: 10, color: '#475569' } },
+                    yAxis: { type: 'category', data: subjSections.map(s => s.name), splitArea: { show: true }, axisLabel: { fontSize: 10, color: '#475569' } },
+                    visualMap: { min: 0, max: 100, calculable: true, orient: 'horizontal', left: 'center', bottom: 0, inRange: { color: ['#f43f5e', '#fde047', '#4ade80'] } },
+                    series: [{ type: 'heatmap', data: heatmapData, label: { show: true }, emphasis: { itemStyle: { shadowBlur: 10, shadowColor: 'rgba(0, 0, 0, 0.5)' } } }]
+                };
+
+                const dates = Object.keys(db.checkins).sort().slice(-30);
+                const trendOption = {
+                    tooltip: { trigger: 'axis' },
+                    grid: { left: '5%', right: '5%', bottom: '10%', top: '10%' },
+                    xAxis: { type: 'category', data: dates, axisLabel: { color: '#64748b' } },
+                    yAxis: { type: 'value', splitLine: { lineStyle: { type: 'dashed', color: '#e2e8f0' } } },
+                    series: [{ data: dates.map(d => db.checkins[d]), type: 'line', smooth: true, areaStyle: { color: 'rgba(59, 130, 246, 0.1)' }, itemStyle: { color: '#3b82f6' }, symbolSize: 6 }]
+                };
+
+                const getGauge = (val) => ({
+                    series: [{
+                        type: 'gauge', startAngle: 90, endAngle: -270, pointer: { show: false },
+                        progress: { show: true, overlap: false, roundCap: true, clip: false, itemStyle: { color: val < 60 ? '#f43f5e' : '#10b981' } },
+                        axisLine: { lineStyle: { width: 6, color: [[1, '#f1f5f9']] } }, splitLine: { show: false }, axisTick: { show: false }, axisLabel: { show: false },
+                        data: [{ value: val, detail: { offsetCenter: ['0%', '0%'], fontSize: 16, fontWeight: 'bold', formatter: '{value}%', color: '#334155' } }]
+                    }]
+                });
+
+                const year = new Date().getFullYear();
+                const calData = Object.keys(db.checkins).map(k => [k, db.checkins[k]]);
+                const calendarOption = {
+                    tooltip: { formatter: p => `${p.value[0]}: 刷卡 ${p.value[1]} 题` },
+                    visualMap: { min: 0, max: 100, type: 'piecewise', orient: 'horizontal', left: 'center', top: 0, inRange: { color: ['#f8fafc', '#bae6fd', '#3b82f6', '#1e3a8a'] }, show: false },
+                    calendar: { top: 30, left: 30, right: 30, bottom: 10, cellSize: ['auto', 16], range: year, itemStyle: { borderWidth: 0.5, borderColor: '#fff', color: '#f8fafc' }, yearLabel: { show: false }, dayLabel: { nameMap: 'ZH', color: '#64748b' }, monthLabel: { nameMap: 'ZH', color: '#64748b' } },
+                    series: [{ type: 'heatmap', coordinateSystem: 'calendar', data: calData }]
+                };
+
+                return { barOption, heatmapOption, trendOption, getGauge, calendarOption };
+            }, [db, flatSections, selectedSubjectId]);
+
+            return (
+                <div className="h-full flex flex-col bg-slate-100 text-slate-800">
+                    
+                    {/* --- 浅色系顶栏 Header --- */}
+                    <header className="bg-white px-6 py-4 flex justify-between items-center shadow-sm border-b border-slate-200 shrink-0 z-10">
+                        <div className="flex items-center space-x-3">
+                            <span className="text-2xl">🌱</span>
+                            <div>
+                                <h1 className="text-lg font-bold text-slate-800 tracking-wide">一建备考智能刷题统计系统</h1>
+                                <p className="text-[11px] text-slate-500">浅色护眼版 · 支持 OCR 智能识图</p>
+                            </div>
+                        </div>
+                        <div className="flex items-center space-x-6 text-sm">
+                            <div className="flex items-center space-x-4 bg-slate-50 px-4 py-1.5 rounded-full border border-slate-200">
+                                <span className="text-slate-600">📅 距考试: <span className="text-blue-600 font-bold text-lg">{daysLeft}</span> 天</span>
+                                <span className="text-slate-300">|</span>
+                                <span className="text-slate-600">状态: {isCheckedInToday ? <span className="text-emerald-500 font-bold">✓ 已打卡</span> : <span className="text-rose-500 font-medium">未打卡</span>}</span>
+                            </div>
+                            <button onClick={() => setShowSettings(true)} className="bg-blue-600 hover:bg-blue-500 transition px-4 py-1.5 rounded-md text-white text-xs font-bold shadow-sm">
+                                ⚙️ 配置 / 备份
+                            </button>
+                        </div>
+                    </header>
+
+                    <div className="flex-1 flex overflow-hidden">
+                        
+                        {/* --- 浅色侧边栏大纲树 --- */}
+                        <aside className="w-[340px] bg-white border-r border-slate-200 flex flex-col shrink-0 z-0">
+                            <div className="p-4 grid grid-cols-3 gap-2 bg-slate-50 border-b border-slate-100 shrink-0">
+                                {db.subjects.map(s => (
+                                    <button key={s.id} onClick={() => setSelectedSubjectId(s.id)} 
+                                        className={`py-2 text-xs font-bold rounded-md transition shadow-sm ${selectedSubjectId === s.id ? 'bg-blue-600 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 hover:text-blue-600'}`}>
+                                        {s.name}
+                                    </button>
+                                ))}
+                            </div>
+                            <div className="flex-1 overflow-y-auto p-4 text-xs font-medium text-slate-600">
+                                {currentSubject?.parts.map(p => (
+                                    <div key={p.id} className="border-l border-slate-200 pl-3 space-y-2 mb-3">
+                                        <div className="group flex justify-between items-center bg-slate-100/80 px-2 py-1.5 rounded text-slate-700">
+                                            <div className="flex-1 cursor-pointer" onClick={() => setExpandedNodes(v => ({...v, [p.id]: !v[p.id]}))}>📂 {p.name}</div>
+                                            <div className="hidden group-hover:flex space-x-2 items-center">
+                                                <span className="text-slate-400 hover:text-blue-500 cursor-pointer" onClick={() => handleEditNode('part', p.id)}>✏️</span>
+                                                <span className="text-slate-400 hover:text-rose-500 cursor-pointer" onClick={() => handleDeleteNode('part', p.id)}>🗑️</span>
+                                                <span className="text-slate-400 hover:text-blue-500 cursor-pointer font-bold" onClick={() => handleAddOutlineNode('chapter', p)}>+章</span>
+                                            </div>
+                                        </div>
+                                        {expandedNodes[p.id] && p.chapters.map(c => (
+                                            <div key={c.id} className="pl-3 space-y-1 fade-in">
+                                                <div className="group flex justify-between items-center text-slate-600 py-1 hover:bg-slate-50 px-2 rounded">
+                                                    <div className="flex-1 cursor-pointer" onClick={() => setExpandedNodes(v => ({...v, [c.id]: !v[c.id]}))}>📄 {c.name}</div>
+                                                    <div className="hidden group-hover:flex space-x-2 items-center">
+                                                        <span className="text-slate-400 hover:text-blue-500 cursor-pointer" onClick={() => handleEditNode('chapter', c.id)}>✏️</span>
+                                                        <span className="text-slate-400 hover:text-rose-500 cursor-pointer" onClick={() => handleDeleteNode('chapter', c.id)}>🗑️</span>
+                                                        <span className="text-slate-400 hover:text-blue-500 cursor-pointer font-bold" onClick={() => handleAddOutlineNode('section', c)}>+节</span>
+                                                    </div>
+                                                </div>
+                                                {expandedNodes[c.id] && c.sections.map(sec => {
+                                                    const rate = sec.singleChoice.total ? Math.round((sec.singleChoice.correct / sec.singleChoice.total)*100) : 0;
+                                                    const isLow = sec.singleChoice.total > 0 && rate < 60;
+                                                    return (
+                                                        <div key={sec.id} onClick={() => setSelectedSectionId(sec.id)} 
+                                                            className={`group flex justify-between items-center px-2 py-1.5 rounded cursor-pointer transition fade-in ${selectedSectionId === sec.id ? 'bg-blue-50 text-blue-700 border-l-2 border-blue-500 font-bold' : 'text-slate-500 hover:bg-slate-100'}`}>
+                                                            <div className="flex-1 flex items-center">
+                                                                <span className={`truncate ${isLow ? 'text-rose-500 font-bold' : ''}`}>🔖 {sec.name}</span>
+                                                                {sec.singleChoice.total > 0 && <span className={`ml-2 text-[10px] px-1.5 py-0.5 rounded ${isLow ? 'bg-rose-100 text-rose-600' : 'bg-slate-200 text-slate-500'}`}>{rate}%</span>}
+                                                            </div>
+                                                            <div className="hidden group-hover:flex space-x-2 items-center ml-2">
+                                                                <span className="text-slate-400 hover:text-blue-500" onClick={(e) => { e.stopPropagation(); handleEditNode('section', sec.id); }}>✏️</span>
+                                                                <span className="text-slate-400 hover:text-rose-500" onClick={(e) => { e.stopPropagation(); handleDeleteNode('section', sec.id); }}>🗑️</span>
+                                                            </div>
+                                                        </div>
+                                                    )
+                                                })}
+                                            </div>
+                                        ))}
+                                    </div>
+                                ))}
+                                <button onClick={()=>handleAddOutlineNode('part')} className="text-blue-600 hover:text-blue-500 mt-4 w-full text-left font-bold bg-blue-50 p-2 rounded border border-blue-100 border-dashed">+ 添加新篇节点</button>
+                            </div>
+                        </aside>
+
+                        {/* --- 右侧主要内容区 --- */}
+                        <main className="flex-1 flex flex-col overflow-hidden bg-slate-50">
+                            
+                            {/* Tab 导航栏 */}
+                            <div className="bg-white border-b border-slate-200 px-6 py-2.5 flex justify-between items-center shrink-0 shadow-sm z-10">
+                                <div className="flex space-x-1 bg-slate-100 p-1 rounded-lg text-xs font-medium border border-slate-200">
+                                    <button onClick={() => setActiveTab("input")} className={`px-4 py-1.5 rounded-md transition ${activeTab === "input" ? 'bg-white shadow text-slate-900 font-bold' : 'text-slate-500 hover:text-slate-800'}`}>✍️ 章节客观题录入</button>
+                                    <button onClick={() => setActiveTab("cases")} className={`px-4 py-1.5 rounded-md transition ${activeTab === "cases" ? 'bg-white shadow text-slate-900 font-bold' : 'text-slate-500 hover:text-slate-800'}`}>🏆 案例微操 & 识图</button>
+                                    <button onClick={() => setActiveTab("dashboard")} className={`px-4 py-1.5 rounded-md transition ${activeTab === "dashboard" ? 'bg-white shadow text-slate-900 font-bold' : 'text-slate-500 hover:text-slate-800'}`}>📊 宏观透视看板</button>
+                                </div>
+                                <span className="text-xs text-slate-400 font-mono bg-slate-100 px-2 py-1 rounded">当前焦点: {currentSection?.name || "未选中"}</span>
+                            </div>
+
+                            <div className="flex-1 overflow-y-auto p-6">
+                                
+                                {/* 视图 1：客观题录入 */}
+                                {activeTab === "input" && (
+                                    <div className="max-w-3xl space-y-6 fade-in mx-auto mt-4">
+                                        <div className="flex justify-between items-end border-b border-slate-200 pb-4">
+                                            <div>
+                                                <div className="text-xs text-slate-500 mb-1">{currentSection ? flatSections.find(s=>s.id===selectedSectionId)?.pathName : ''}</div>
+                                                <h2 className="text-2xl font-bold text-slate-800">{currentSection?.name || '👈 请先在左侧选择大纲章节'}</h2>
+                                            </div>
+                                            {currentSection && (
+                                                <button onClick={handleCheckIn} className="bg-emerald-500 hover:bg-emerald-600 text-white px-6 py-2.5 rounded-lg font-bold shadow-sm transition">
+                                                    📅 今日一键打卡
+                                                </button>
+                                            )}
+                                        </div>
+                                        
+                                        {currentSection && (
+                                            <>
+                                                <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm grid grid-cols-2 gap-6">
+                                                    <div className="col-span-2 flex items-center space-x-2 text-blue-600 font-bold border-b border-slate-100 pb-2">
+                                                        <span className="w-1.5 h-4 bg-blue-500 rounded-full inline-block"></span> <span>单项选择题</span>
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-xs font-bold text-slate-500 mb-2">总做题量 (道)</label>
+                                                        <input type="number" value={currentSection.singleChoice.total||''} onChange={e=>handleObjectiveChange('singleChoice','total',e.target.value)} className="w-full bg-slate-50 border border-slate-200 p-2.5 rounded-lg focus:outline-none focus:border-blue-500 focus:bg-white transition text-sm" />
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-xs font-bold text-slate-500 mb-2">正确数量 (道)</label>
+                                                        <input type="number" value={currentSection.singleChoice.correct||''} onChange={e=>handleObjectiveChange('singleChoice','correct',e.target.value)} className="w-full bg-slate-50 border border-slate-200 p-2.5 rounded-lg focus:outline-none focus:border-blue-500 focus:bg-white transition text-sm" />
+                                                    </div>
+                                                </div>
+
+                                                <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm grid grid-cols-3 gap-6">
+                                                    <div className="col-span-3 flex items-center space-x-2 text-blue-600 font-bold border-b border-slate-100 pb-2">
+                                                        <span className="w-1.5 h-4 bg-blue-500 rounded-full inline-block"></span> <span>多项选择题</span>
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-xs font-bold text-slate-500 mb-2">总做题量 (道)</label>
+                                                        <input type="number" value={currentSection.multiChoice.total||''} onChange={e=>handleObjectiveChange('multiChoice','total',e.target.value)} className="w-full bg-slate-50 border border-slate-200 p-2.5 rounded-lg focus:outline-none focus:border-blue-500 focus:bg-white transition text-sm" />
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-xs font-bold text-slate-500 mb-2">满分总计 (分)</label>
+                                                        <input type="number" value={currentSection.multiChoice.maxScore||''} onChange={e=>handleObjectiveChange('multiChoice','maxScore',e.target.value)} className="w-full bg-slate-50 border border-slate-200 p-2.5 rounded-lg focus:outline-none focus:border-blue-500 focus:bg-white transition text-sm" />
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-xs font-bold text-slate-500 mb-2">学员实得 (分)</label>
+                                                        <input type="number" value={currentSection.multiChoice.actualScore||''} onChange={e=>handleObjectiveChange('multiChoice','actualScore',e.target.value)} className="w-full bg-slate-50 border border-slate-200 p-2.5 rounded-lg focus:outline-none focus:border-blue-500 focus:bg-white transition text-sm" />
+                                                    </div>
+                                                </div>
+                                            </>
+                                        )}
+                                    </div>
+                                )}
+
+                                {/* 视图 2：案例题极限微操 (含图文 OCR) */}
+                                {activeTab === "cases" && (
+                                    <div className="space-y-6 fade-in max-w-[1400px] mx-auto">
+                                        <div className="flex justify-between items-center bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+                                            <div>
+                                                <h2 className="text-lg font-bold text-slate-800">👑 案例题高级拆解与 AI 识图库</h2>
+                                                <p className="text-xs text-slate-500 mt-1">手动录入或上传题目图片自动识别，精准定位每一个小问考点盲区。</p>
+                                            </div>
+                                            <div className="flex space-x-3">
+                                                <label className="bg-white border border-blue-600 text-blue-600 hover:bg-blue-50 text-xs font-bold px-4 py-2.5 rounded-lg shadow-sm transition cursor-pointer flex items-center">
+                                                    📷 上传图片智能识别 OCR
+                                                    <input type="file" accept="image/*" onChange={handleOcrUpload} disabled={isAiLoading} />
+                                                </label>
+                                                <button onClick={() => {
+                                                    const name = prompt("请输入新案例大题名称：");
+                                                    if (name) setDb(prev => ({ ...prev, caseQuestions: [{ id: generateId(), name, backgroundText: "", subjectId: selectedSubjectId, subQuestions: [] }, ...prev.caseQuestions] }));
+                                                }} className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold px-5 py-2.5 rounded-lg shadow transition">+ 新增真题案例</button>
+                                            </div>
+                                        </div>
+
+                                        <div className="grid gap-6">
+                                            {db.caseQuestions.filter(c => c.subjectId === selectedSubjectId).map(cq => (
+                                                <div key={cq.id} className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
+                                                    {/* 大题标题栏 */}
+                                                    <div className="bg-slate-50 px-6 py-4 border-b border-slate-200 flex justify-between items-center">
+                                                        <input type="text" value={cq.name} onChange={(e) => {
+                                                            const val = e.target.value;
+                                                            setDb(prev => ({ ...prev, caseQuestions: prev.caseQuestions.map(c => c.id === cq.id ? { ...c, name: val } : c) }));
+                                                        }} className="font-bold text-slate-700 bg-transparent focus:outline-none focus:border-b border-blue-500 w-1/2" />
+                                                        <div className="flex space-x-4">
+                                                            <button onClick={() => setDb(prev => ({...prev, caseQuestions: prev.caseQuestions.map(c => c.id === cq.id ? {...c, subQuestions: [...c.subQuestions, {id: generateId(), title: `第${c.subQuestions.length+1}问：`, maxScore: 5, actualScore: 0, linkedSectionId: ""}]} : c)}))} className="text-xs text-blue-600 hover:text-blue-800 font-bold">+ 添加小问</button>
+                                                            <button onClick={() => confirm("确定删除这道案例题吗？") && setDb(prev => ({...prev, caseQuestions: prev.caseQuestions.filter(c => c.id !== cq.id)}))} className="text-xs text-rose-500 hover:text-rose-700">删除大题</button>
+                                                        </div>
+                                                    </div>
+                                                    
+                                                    <div className="p-6 flex flex-col gap-6 bg-white">
+                                                        {/* 顶部区域：图片与题干背景信息并排展示 */}
+                                                        <div className="flex flex-col lg:flex-row gap-6">
+                                                            {/* 左侧：识别原图存留 (如果存在) */}
+                                                            {cq.imageUrl && (
+                                                                <div className="w-full lg:w-2/5 shrink-0">
+                                                                    <p className="text-[10px] text-slate-400 font-bold mb-2 uppercase">识别原图存留</p>
+                                                                    <img src={cq.imageUrl} alt="案例题配图" className="w-full rounded-lg border border-slate-200 shadow-sm object-contain bg-slate-50 max-h-80" />
+                                                                </div>
+                                                            )}
+                                                            {/* 右侧/全宽：题干背景信息 */}
+                                                            <div className="flex-1 flex flex-col">
+                                                                <p className="text-[10px] text-slate-400 font-bold mb-2 uppercase">题干背景信息 (可编辑)</p>
+                                                                <textarea 
+                                                                    value={cq.backgroundText || ''} 
+                                                                    onChange={(e) => setDb(prev => ({ ...prev, caseQuestions: prev.caseQuestions.map(c => c.id === cq.id ? { ...c, backgroundText: e.target.value } : c) }))}
+                                                                    className="flex-1 w-full p-4 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-700 focus:outline-none focus:border-blue-500 focus:bg-white transition resize-y min-h-[160px] leading-relaxed"
+                                                                    placeholder="此处为案例的题干背景信息，支持手动输入。若使用智能OCR识图，AI 会自动将提取到的前置条件和工程背景填入此处..."
+                                                                />
+                                                            </div>
+                                                        </div>
+
+                                                        {/* 分割线与下方小问列表区域 */}
+                                                        <div className="border-t border-slate-100 pt-6">
+                                                            <h4 className="text-xs font-bold text-slate-600 mb-4 flex items-center space-x-2">
+                                                                <span className="w-1.5 h-3 bg-blue-500 rounded-full inline-block"></span>
+                                                                <span>细分小问与考点微操</span>
+                                                            </h4>
+                                                            <div className="space-y-3">
+                                                                {cq.subQuestions.length === 0 ? <div className="text-center text-xs text-slate-400 py-6 bg-slate-50 rounded-lg border border-dashed border-slate-200">暂无细分小问，请点击右上角手动添加或重新上传图片识别。</div> : 
+                                                                    cq.subQuestions.map((sub, idx) => {
+                                                                        const rate = sub.maxScore > 0 ? Math.round((sub.actualScore / sub.maxScore) * 100) : 0;
+                                                                        return (
+                                                                            <div key={sub.id} className="flex flex-wrap xl:flex-nowrap gap-4 items-start bg-slate-50/80 p-4 rounded-xl border border-slate-200 transition hover:border-blue-300 hover:shadow-sm">
+                                                                                {/* 改为 textarea 以防问题描述过长，并限制其宽度占比 */}
+                                                                                <div className="flex-1 min-w-[280px] xl:max-w-[40%]">
+                                                                                    <label className="block text-[10px] text-slate-400 mb-1">小问描述</label>
+                                                                                    <textarea value={sub.title} rows="2" onChange={(e) => handleUpdateSub(cq.id, sub.id, 'title', e.target.value)} className="w-full bg-white border border-slate-200 rounded-md px-3 py-2 text-xs focus:border-blue-500 focus:outline-none text-slate-700 resize-y shadow-sm" placeholder="输入第X问详细描述..." />
+                                                                                </div>
+                                                                                {/* 打分与考点映射 */}
+                                                                                <div className="flex flex-1 flex-wrap gap-4 items-start">
+                                                                                    <div className="flex items-center space-x-2 bg-white px-3 py-2 rounded-md border border-slate-200 shadow-sm shrink-0">
+                                                                                        <span className="text-[10px] text-slate-500 font-medium">满分</span>
+                                                                                        <input type="number" value={sub.maxScore||''} onChange={(e) => handleUpdateSub(cq.id, sub.id, 'maxScore', e.target.value)} className="w-12 bg-slate-50 border border-slate-100 rounded px-1.5 py-1 text-xs text-center focus:outline-none focus:border-blue-400 focus:bg-white" />
+                                                                                        <span className="text-slate-300">|</span>
+                                                                                        <span className="text-[10px] text-slate-500 font-medium">实得</span>
+                                                                                        <input type="number" value={sub.actualScore||''} onChange={(e) => handleUpdateSub(cq.id, sub.id, 'actualScore', e.target.value)} className="w-12 bg-slate-50 border border-slate-100 rounded px-1.5 py-1 text-xs text-center focus:outline-none focus:border-blue-400 focus:bg-white" />
+                                                                                    </div>
+                                                                                    <div className="flex-1 min-w-[200px]">
+                                                                                         <label className="block text-[10px] text-slate-400 mb-1">关联大纲知识点</label>
+                                                                                        <select value={sub.linkedSectionId} onChange={(e) => handleUpdateSub(cq.id, sub.id, 'linkedSectionId', e.target.value)} className="w-full bg-white border border-slate-200 rounded-md px-2 py-2 text-xs text-slate-600 focus:outline-none focus:border-blue-500 shadow-sm">
+                                                                                            <option value="">-- 未归类 (请选择考点) --</option>
+                                                                                            {flatSections.filter(fs=>fs.subjectId===selectedSubjectId).map(fs => <option key={fs.id} value={fs.id}>{fs.pathName}</option>)}
+                                                                                        </select>
+                                                                                    </div>
+                                                                                </div>
+                                                                                <div className="shrink-0 w-full xl:w-24 flex xl:flex-col items-center xl:items-end justify-between xl:justify-center gap-2 pt-2 xl:pt-0">
+                                                                                    <span className={`inline-block text-xs px-2.5 py-1 rounded-md font-bold shadow-sm ${rate < 60 ? 'bg-rose-50 text-rose-600 border border-rose-100' : 'bg-emerald-50 text-emerald-600 border border-emerald-100'}`}>{rate}%</span>
+                                                                                    <span className="text-slate-400 hover:text-rose-500 cursor-pointer text-[10px] font-bold uppercase tracking-wider" onClick={() => setDb(prev => ({...prev, caseQuestions: prev.caseQuestions.map(c => c.id === cq.id ? {...c, subQuestions: c.subQuestions.filter(s => s.id !== sub.id)} : c)}))}>🗑 移除</span>
+                                                                                </div>
+                                                                            </div>
+                                                                        );
+                                                                    })
+                                                                }
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* 视图 3：宏观透视看板 (浅色版) */}
+                                {activeTab === "dashboard" && (
+                                    <div className="space-y-6 fade-in pb-10">
+                                        <div className="grid grid-cols-4 gap-6">
+                                            {db.subjects.map(s => (
+                                                <div key={s.id} className="bg-white rounded-xl border border-slate-200 p-5 flex flex-col justify-center items-center shadow-sm relative overflow-hidden">
+                                                    <span className="font-bold text-slate-600 text-xs mb-2 z-10">{s.name} 得分率</span>
+                                                    <EChart option={chartOptions.getGauge(dashboardStats.subjScores[s.id])} style={{width:'90px', height:'90px'}} className="z-10" />
+                                                </div>
+                                            ))}
+                                            <div className="bg-gradient-to-br from-blue-600 to-indigo-600 rounded-xl text-white p-6 shadow-md flex flex-col justify-center relative overflow-hidden">
+                                                <div className="text-xs text-blue-200 font-bold tracking-wider mb-2 z-10">全局统计概览</div>
+                                                <div className="font-black text-3xl z-10">{dashboardStats.totalQs} <span className="text-sm font-normal opacity-80">题</span></div>
+                                                <div className="text-xs text-blue-100 mt-2 z-10 flex items-center space-x-1">
+                                                    <span className="w-2 h-2 rounded-full bg-emerald-300"></span>
+                                                    <span>近7天打卡: <span className="text-white font-bold">{dashboardStats.last7DaysCount}</span> 天</span>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                                            <div className="flex border-b border-slate-200 px-6 py-3 space-x-6 bg-slate-50">
+                                                <button onClick={()=>setActiveChartTab('bar')} className={`text-sm font-bold pb-2 border-b-2 transition ${activeChartTab==='bar'?'text-blue-600 border-blue-600':'text-slate-500 border-transparent hover:text-slate-700'}`}>📊 各节正确率</button>
+                                                <button onClick={()=>setActiveChartTab('heatmap')} className={`text-sm font-bold pb-2 border-b-2 transition ${activeChartTab==='heatmap'?'text-blue-600 border-blue-600':'text-slate-500 border-transparent hover:text-slate-700'}`}>🗺️ 薄弱定位热力图</button>
+                                                <button onClick={()=>setActiveChartTab('trend')} className={`text-sm font-bold pb-2 border-b-2 transition ${activeChartTab==='trend'?'text-blue-600 border-blue-600':'text-slate-500 border-transparent hover:text-slate-700'}`}>📈 近30天趋势</button>
+                                            </div>
+                                            <div className="p-4 bg-white">
+                                                {activeChartTab === 'bar' && <EChart option={chartOptions.barOption} style={{width:'100%', height:'320px'}} />}
+                                                {activeChartTab === 'heatmap' && <EChart option={chartOptions.heatmapOption} style={{width:'100%', height:'360px'}} />}
+                                                {activeChartTab === 'trend' && <EChart option={chartOptions.trendOption} style={{width:'100%', height:'320px'}} />}
+                                            </div>
+                                        </div>
+
+                                        <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4">
+                                            <h3 className="font-bold text-slate-800 text-sm flex items-center space-x-2 border-b border-slate-100 pb-3">
+                                                <span className="text-xl">🔍</span> <span>案例细分考点【逆向分析表】</span>
+                                            </h3>
+                                            <div className="overflow-x-auto">
+                                                <table className="w-full text-left text-xs border-collapse">
+                                                    <thead>
+                                                        <tr className="bg-slate-50 text-slate-600 uppercase font-bold border-b border-slate-200">
+                                                            <th className="p-3">考点所在大纲完整路径</th>
+                                                            <th className="p-3">关联小问</th>
+                                                            <th className="p-3">平均得分率</th>
+                                                            <th className="p-3 text-right">系统评估</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody className="divide-y divide-slate-100 text-slate-700">
+                                                        {flatSections.map(sec => {
+                                                            const matchedSubs = db.caseQuestions.flatMap(cq => cq.subQuestions).filter(sub => sub.linkedSectionId === sec.id);
+                                                            if (matchedSubs.length === 0) return null;
+                                                            const totalMax = matchedSubs.reduce((sum, curr) => sum + curr.maxScore, 0);
+                                                            const totalAct = matchedSubs.reduce((sum, curr) => sum + curr.actualScore, 0);
+                                                            const avgRate = totalMax > 0 ? Math.round((totalAct / totalMax) * 100) : 0;
+                                                            return (
+                                                                <tr key={sec.id} className="hover:bg-slate-50/50 transition">
+                                                                    <td className="p-3 font-medium text-slate-800">{sec.pathName}</td>
+                                                                    <td className="p-3"><span className="bg-slate-100 text-slate-600 px-2 py-0.5 rounded border border-slate-200">{matchedSubs.length}</span></td>
+                                                                    <td className="p-3 font-bold text-slate-900">{avgRate}%</td>
+                                                                    <td className="p-3 text-right">
+                                                                        <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold ${avgRate < 60 ? 'bg-rose-50 text-rose-600 border border-rose-200' : 'bg-emerald-50 text-emerald-600 border border-emerald-200'}`}>
+                                                                            {avgRate < 60 ? "🚨 案例失分盲区" : "✨ 掌握牢固"}
+                                                                        </span>
+                                                                    </td>
+                                                                </tr>
+                                                            );
+                                                        })}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </div>
+
+                                        <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+                                            <h3 className="font-bold text-slate-800 text-sm flex items-center space-x-2 mb-4">
+                                                <span className="text-xl">📅</span> <span>年度打卡热力矩阵</span>
+                                            </h3>
+                                            <EChart option={chartOptions.calendarOption} style={{width:'100%', height:'220px'}} />
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* --- 底部 AI Kimi 助手 --- */}
+                            <footer className="bg-white border-t border-slate-200 p-5 shrink-0 z-10 shadow-sm">
+                                <div className="max-w-5xl mx-auto flex flex-col space-y-3">
+                                    <div className="flex justify-between items-center">
+                                        <div className="flex items-center space-x-2">
+                                            <span className="animate-pulse w-2 h-2 rounded-full bg-blue-500"></span>
+                                            <h4 className="text-xs font-bold text-blue-700">KIMI 智能攻坚诊断中心 (支持图文)</h4>
+                                        </div>
+                                        <button onClick={fetchAiAdvice} disabled={isAiLoading} className="bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-bold px-4 py-1.5 rounded-md transition shadow-sm disabled:opacity-50">
+                                            {isAiLoading ? "大模型急速透视中..." : "👉 生成学习指导建议"}
+                                        </button>
+                                    </div>
+                                    <div className="bg-slate-50 p-4 rounded-lg text-xs font-mono text-slate-600 max-h-28 overflow-y-auto whitespace-pre-wrap leading-relaxed border border-slate-200 shadow-inner">
+                                        {!settings.kimiApiKey ? <span className="text-rose-500">⚠️ 尚未配置 Kimi API Key，请点击右上角【配置】录入密钥。</span> : (aiAdvice || "系统闲置中。点击右侧按钮生成建议，或在案例区上传图片体验 OCR 智能拆题。")}
+                                    </div>
+                                </div>
+                            </footer>
+                        </main>
+                    </div>
+
+                    {/* --- 系统设置弹窗 --- */}
+                    {showSettings && (
+                        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 fade-in">
+                            <div className="bg-white w-[420px] rounded-2xl shadow-xl border border-slate-100 overflow-hidden">
+                                <div className="px-6 py-4 bg-slate-50 border-b border-slate-100 flex justify-between items-center">
+                                    <h3 className="font-bold text-slate-800 text-sm">🛠️ 系统配置中心</h3>
+                                    <button onClick={() => setShowSettings(false)} className="text-slate-400 hover:text-rose-500 font-bold">✕</button>
+                                </div>
+                                <div className="p-6 space-y-5 text-sm">
+                                    <div>
+                                        <label className="block font-bold text-slate-700 text-xs mb-2">一建考试日期设定</label>
+                                        <input type="date" value={settings.examDate} onChange={(e) => setSettings(prev => ({ ...prev, examDate: e.target.value }))} className="w-full border border-slate-300 rounded-lg p-2 focus:outline-none focus:border-blue-500 bg-white" />
+                                    </div>
+                                    <div>
+                                        <label className="block font-bold text-slate-700 text-xs mb-2">Kimi API Key (支持 Vision)</label>
+                                        <input type="password" value={settings.kimiApiKey} placeholder="sk-..." onChange={(e) => setSettings(prev => ({ ...prev, kimiApiKey: e.target.value }))} className="w-full border border-slate-300 rounded-lg p-2 font-mono focus:outline-none focus:border-blue-500 bg-white" />
+                                        <p className="text-[10px] text-slate-500 mt-2">🔒 密钥本地存储。配置有效密钥后，即可解锁 AI 分析与 OCR 智能识图功能。</p>
+                                    </div>
+                                    <div className="pt-4 border-t border-slate-100 grid grid-cols-2 gap-3">
+                                        <button onClick={() => {
+                                            const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify({ db, settings }));
+                                            const dlNode = document.createElement('a'); dlNode.href = dataStr; dlNode.download = `yijian_backup_${new Date().toISOString().split('T')[0]}.json`; dlNode.click();
+                                        }} className="bg-slate-800 hover:bg-slate-700 text-white text-xs py-2.5 rounded-lg font-bold shadow-sm transition">备份导出数据</button>
+                                        
+                                        <label className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs py-2.5 rounded-lg font-bold shadow-sm text-center cursor-pointer transition">
+                                            导入历史 JSON
+                                            <input type="file" accept=".json" onChange={(e) => {
+                                                const file = e.target.files[0]; if (!file) return;
+                                                const r = new FileReader();
+                                                r.onload = (evt) => {
+                                                    try { const parsed = JSON.parse(evt.target.result); if (parsed.db) setDb(parsed.db); if (parsed.settings) setSettings(parsed.settings); alert("数据恢复成功！"); } catch { alert("文件格式错误！"); }
+                                                }; r.readAsText(file);
+                                            }} className="hidden" />
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
